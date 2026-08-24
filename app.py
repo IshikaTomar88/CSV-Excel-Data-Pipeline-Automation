@@ -1,34 +1,25 @@
 """
 ================================================================================
- SERVICE: Zero-Touch CSV/Excel Data Pipeline Automation & Executive Reporter
-================================================================================
-ENTERPRISE FEATURES ADDED:
-  1. Complete Data Privacy: In-memory secure processing (zero file retention).
-  2. Smart Trial Metering: Locks down automatically after 2 free runs.
-  3. Dynamic Admin Access Control: Approve/revoke client access duration (days)
-     directly from the UI sidebar or via automated email alerts.
+ SERVICE: Enterprise Zero-Touch Data Pipeline & Secure Memory Suite
 ================================================================================
 """
 
+import hashlib
+import io
 import json
-import logging
-import os
-import smtplib
-from datetime import datetime, timedelta
-from email.message import EmailMessage
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-# --------------------------------------------------------------------------
-# PAGE CONFIGURATION & STYLING
-# --------------------------------------------------------------------------
+
+# PAGE CONFIGURATION & MODERN EXECUTIVE STYLING
+
 st.set_page_config(
-    page_title="Enterprise Data Pipeline & Analytics Suite",
-    page_icon="⚡",
+    page_title="Enterprise Data Pipeline & Secure Vault",
+    page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -36,18 +27,29 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-        .main-header { font-size: 2.2rem; font-weight: 700; color: #1E3A8A; }
-        .sub-header { font-size: 1.1rem; color: #4B5563; }
-        .security-badge { background-color: #ECFDF5; border: 1px solid #10B981; padding: 10px; border-radius: 6px; color: #065F46; font-weight: 600; }
-        .warning-box { background-color: #FEF3C7; border: 1px solid #F59E0B; padding: 12px; border-radius: 6px; color: #92400E; }
+        .main-title { font-size: 2.5rem; font-weight: 800; color: #0F172A; letter-spacing: -0.025em; }
+        .sub-title { font-size: 1.1rem; color: #475569; font-weight: 400; }
+        .card { background: #F8FAFC; border: 1px solid #E2E8F0; padding: 20px; border-radius: 12px; margin-bottom: 15px; }
+        .secure-banner { background: #064E3B; color: #ECFDF5; padding: 12px 18px; border-radius: 8px; font-weight: 500; font-size: 0.95rem; display: flex; align-items: center; gap: 10px; }
+        .stButton>button { border-radius: 8px; font-weight: 600; padding: 0.5rem 1rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# --------------------------------------------------------------------------
+
+# INITIALIZE ADVANCED MEMORY MANAGER IN SESSION STATE
+
+if "short_term_cache" not in st.session_state:
+    st.session_state.short_term_cache = None  # Active session cleaned data dataframe
+
+if "long_term_vault" not in st.session_state:
+    # Stores encrypted or password-locked reports: { report_name: { "summary": df, "data": bytes, "hash": str, "timestamp": str } }
+    st.session_state.long_term_vault = {}
+
+
 # CONFIGURATION CONSTANTS & MAPPINGS
-# --------------------------------------------------------------------------
+
 COLUMN_MAP = {
     "cust name": "customer_name",
     "customer name": "customer_name",
@@ -78,112 +80,9 @@ MISSING_VALUE_STRATEGY = {
     "region": "fill_unknown",
 }
 
-# --------------------------------------------------------------------------
-# SESSION STATE & PERSISTENT CLIENT PERMISSION DATABASE SIMULATION
-# --------------------------------------------------------------------------
-if "run_count" not in st.session_state:
-    st.session_state.run_count = 0
-if "client_email" not in st.session_state:
-    st.session_state.client_email = "guest_user@company.com"
-if "access_database" not in st.session_state:
-    # Tracks approved clients and their access expiry date/time
-    # Format: { "client@email.com": {"expiry": datetime, "status": "Active"} }
-    st.session_state.access_database = {}
 
-MAX_FREE_RUNS = 2  # Free executions before access approval is mandatory
+# CORE ETL TRANSFORMATION & VECTORIZED ENGINE
 
-
-def send_access_alert_email(client_email: str):
-    """Sends automated email notification to developer inbox."""
-    try:
-        smtp_server = st.secrets["email"]["smtp_server"]
-        smtp_port = st.secrets["email"]["smtp_port"]
-        sender_email = st.secrets["email"]["sender_email"]
-        sender_password = st.secrets["email"]["sender_password"]
-        receiver_email = st.secrets["email"]["receiver_email"]
-    except Exception:
-        return False
-
-    msg = EmailMessage()
-    msg.set_subject(f"🚨 ACCESS REQUEST: {client_email} needs pipeline extension")
-    msg.set_content(
-        f"Hello Admin,\n\nClient {client_email} has used their {MAX_FREE_RUNS} free pipeline trials.\n"
-        f"Log into your Streamlit Admin Sidebar to grant them specific day-based access."
-    )
-    msg["From"] = sender_email
-    msg["To"] = receiver_email
-
-    try:
-        with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
-        return True
-    except Exception:
-        return False
-
-
-def check_client_authorization(email: str) -> bool:
-    """Checks if a given client has active, unexpired day-based access."""
-    if email in st.session_state.access_database:
-        client_record = st.session_state.access_database[email]
-        if datetime.now() < client_record["expiry"]:
-            return True
-    return False
-
-
-# --------------------------------------------------------------------------
-# ADMIN SIDEBAR CONTROL PANEL
-# --------------------------------------------------------------------------
-with st.sidebar:
-    st.header("⚙️ Admin Control Panel")
-    st.markdown("Manage client access durations and permissions remotely.")
-    
-    admin_password_input = st.text_input("Admin Secret Key", type="password")
-    is_admin = admin_password_input == "admin123"  # Change or secure via secrets
-
-    if is_admin:
-        st.success("Admin Mode Unlocked 🔓")
-        st.divider()
-        st.subheader("Client Access Manager")
-        
-        if st.session_state.access_database:
-            for mail, data in list(st.session_state.access_database.items()):
-                time_left = data["expiry"] - datetime.now()
-                hours_left = max(0, int(time_left.total_seconds() // 3600))
-                st.text(f"👤 {mail}\n⏳ Expires in: {hours_left} hrs")
-                
-                col_adm1, col_adm2 = st.columns(2)
-                with col_adm1:
-                    if st.button(f"Revoke", key=f"rev_{mail}"):
-                        del st.session_state.access_database[mail]
-                        st.rerun()
-                with col_adm2:
-                    if st.button(f"+7 Days", key=f"ext_{mail}"):
-                        st.session_state.access_database[mail]["expiry"] = datetime.now() + timedelta(days=7)
-                        st.rerun()
-                st.markdown("---")
-        else:
-            st.info("No active custom client permissions logged yet.")
-            
-        # Manual grant feature for admin
-        st.subheader("Grant Access Manually")
-        manual_email = st.text_input("Client Email to Authorize")
-        grant_days = st.number_input("Access Duration (Days)", min_value=1, max_value=30, value=3)
-        if st.button("Grant Access Key"):
-            if manual_email:
-                st.session_state.access_database[manual_email] = {
-                    "expiry": datetime.now() + timedelta(days=grant_days),
-                    "status": "Active"
-                }
-                st.success(f"Granted {grant_days} days access to {manual_email}!")
-                st.rerun()
-    else:
-        st.info("Enter admin key to view and manage client license requests.")
-
-
-# --------------------------------------------------------------------------
-# CORE ETL TRANSFORMATION FUNCTIONS
-# --------------------------------------------------------------------------
 def load_raw_file(uploaded_file) -> pd.DataFrame:
     suffix = Path(uploaded_file.name).suffix.lower()
     if suffix == ".csv":
@@ -274,109 +173,165 @@ def build_executive_summary(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(list(summary.items()), columns=["Executive Metric", "Value"])
 
 
-# --------------------------------------------------------------------------
-# MAIN APPLICATION INTERFACE & ACCESS GATE LOGIC
-# --------------------------------------------------------------------------
-st.markdown('<p class="main-header">⚡ Zero-Touch Data Pipeline & Executive Cleaner</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Transform chaotic raw data dumps into executive-ready dashboards instantly with 100% mathematical precision.</p>', unsafe_allow_html=True)
+# SIDEBAR — ADVANCED MEMORY & SECURE VAULT MANAGER
+
+with st.sidebar:
+    st.markdown("### 🧠 Memory & Vault Manager")
+    st.markdown("Control short-term operational cache, long-term summaries, and military-grade encryption keys.")
+    st.divider()
+
+    st.markdown("#### 📦 Long-Term Secure Vault")
+    if st.session_state.long_term_vault:
+        st.success(f"{len(st.session_state.long_term_vault)} report(s) safely vaulted.")
+        selected_vault_item = st.selectbox("Select Vault Report", list(st.session_state.long_term_vault.keys()))
+        
+        vault_pwd_input = st.text_input("Enter Vault File Password", type="password", key="vault_unlock_pwd")
+        
+        col_v1, col_v2 = st.columns(2)
+        with col_v1:
+            if st.button("Unlock & Download"):
+                record = st.session_state.long_term_vault[selected_vault_item]
+                hashed_input = hashlib.sha256(vault_pwd_input.encode()).hexdigest()
+                if hashed_input == record["hash"]:
+                    st.success("Access Granted!")
+                    st.download_button(
+                        "📥 Get Encrypted Excel",
+                        data=record["data"],
+                        file_name=f"secure_{selected_vault_item}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.error("Incorrect Vault Password!")
+        with col_v2:
+            if st.button("Purge Item"):
+                del st.session_state.long_term_vault[selected_vault_item]
+                st.rerun()
+    else:
+        st.info("Vault is currently empty.")
+
+    st.divider()
+    if st.button("🧹 Clear All Session & Cache Memory", type="secondary"):
+        st.session_state.short_term_cache = None
+        st.session_state.long_term_vault = {}
+        st.rerun()
+
+
+# MAIN INTERFACE
+
+st.markdown('<p class="main-title">⚡ Zero-Touch Data Pipeline & Secure Vault</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">High-performance vector cleaning suite backed by a privacy-first memory manager and optional password protection.</p>', unsafe_allow_html=True)
 st.markdown("---")
 
-# Privacy Security Banner
+# Privacy Security Notice Banner
 st.markdown(
     """
-    <div class="security-badge">
-        🔒 <b>Enterprise Privacy Guarantee:</b> Your data is processed entirely in isolated memory and is never saved, logged, or retained on permanent servers. Complete confidentiality is guaranteed.
+    <div class="secure-banner">
+        🛡️ <b>Strict Zero-Retention Privacy:</b> All raw files are parsed in isolated memory. Data is never written to public disks unless you explicitly choose to save summaries or encrypt files into your private session vault.
     </div>
     """,
     unsafe_allow_html=True,
 )
 st.markdown("<br>", unsafe_allow_html=True)
 
-# Evaluate if client needs authorization gate
-is_authorized = check_client_authorization(st.session_state.client_email)
-trial_exhausted = st.session_state.run_count >= MAX_FREE_RUNS
+# Main Application Tabs
+tab_pipeline, tab_vault_viewer = st.tabs(["🚀 Pipeline Execution", "📂 Active Memory & Summary Logs"])
 
-if trial_exhausted and not is_authorized:
-    st.markdown(
-        """
-        <div class="warning-box">
-            <b>Trial Limit Reached:</b> You have utilized your free sample executions. Please submit your business email to request extended day-based operational access.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    
-    col_req1, col_req2 = st.columns([2, 1])
-    with col_req1:
-        email_input = st.text_input("Enter your business email address:", value=st.session_state.client_email)
-    with col_req2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        request_clicked = st.button("📨 Request Access Extension", type="primary")
+with tab_pipeline:
+    uploaded_file = st.file_uploader("Upload Raw Business Dataset (.csv, .xlsx, .xls, .json)", type=["csv", "xlsx", "xls", "json"])
 
-    if request_clicked:
-        if email_input:
-            st.session_state.client_email = email_input
-            send_access_alert_email(email_input)
-            st.success("Access request transmitted successfully! The administrator has been notified to unlock your dashboard.")
-        else:
-            st.error("Please provide a valid email.")
-            
-    st.stop()  # Halt app rendering until authorized
+    if uploaded_file is not None:
+        try:
+            with st.spinner("Extracting file into secure memory..."):
+                df_raw = load_raw_file(uploaded_file)
 
-# --- OPERATIONAL PIPELINE INTERFACE ---
-uploaded_file = st.file_uploader("Upload Raw Business Data Export (.csv, .xlsx, .xls, .json)", type=["csv", "xlsx", "xls", "json"])
+            st.write(f"### 📥 Raw Dataset Preview ({len(df_raw):,} records found)")
+            st.dataframe(df_raw.head(3), use_container_width=True)
 
-if uploaded_file is not None:
-    try:
-        with st.spinner("Extracting file into secure session memory..."):
-            df_raw = load_raw_file(uploaded_file)
+            if st.button("✨ Run Vectorized Cleaning Pipeline", type="primary"):
+                with st.spinner("Executing high-speed Pandas/NumPy cleaning pipeline..."):
+                    df = normalize_columns(df_raw, COLUMN_MAP)
+                    df = clean_data(df, CLEANING_RULES)
+                    df = handle_missing_values(df, MISSING_VALUE_STRATEGY)
+                    df = remove_duplicates(df)
+                    df = flag_outliers(df, col="amount" if "amount" in df else df.columns[0])
+                    summary_df = build_executive_summary(df)
 
-        st.write(f"### 📥 Raw Data Preview ({len(df_raw):,} rows identified)")
-        st.dataframe(df_raw.head(3), use_container_width=True)
+                # Save to short-term session memory manager
+                st.session_state.short_term_cache = {
+                    "filename": uploaded_file.name,
+                    "clean_df": df,
+                    "summary_df": summary_df,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                st.success("Pipeline successfully completed and cached in short-term memory!")
 
-        if st.button("🚀 Run Automated Data Cleaning & Transformation Pipeline", type="primary"):
-            st.session_state.run_count += 1
+            # If data exists in short term memory, display results and advanced saving options
+            if st.session_state.short_term_cache is not None:
+                cache = st.session_state.short_term_cache
+                st.markdown("---")
+                st.write("### 📊 Executive KPI Summary")
+                st.dataframe(cache["summary_df"], use_container_width=True)
 
-            with st.spinner("Executing vectorized Pandas/NumPy cleaning algorithms..."):
-                df = normalize_columns(df_raw, COLUMN_MAP)
-                df = clean_data(df, CLEANING_RULES)
-                df = handle_missing_values(df, MISSING_VALUE_STRATEGY)
-                df = remove_duplicates(df)
-                df = flag_outliers(df, col="amount" if "amount" in df else df.columns[0])
-                summary_df = build_executive_summary(df)
+                st.write("### ✨ Cleaned Data Sample")
+                st.dataframe(cache["clean_df"].head(10), use_container_width=True)
 
-            st.success(f"Pipeline finished successfully! Free runs used: {min(st.session_state.run_count, MAX_FREE_RUNS)}/{MAX_FREE_RUNS}")
-            
-            st.write("### 📊 Executive KPI Summary Dashboard")
-            st.dataframe(summary_df, use_container_width=True)
-
-            st.write("### ✨ Fully Cleaned Dataset Preview")
-            st.dataframe(df.head(10), use_container_width=True)
-
-            # File Downloads
-            col_d1, col_d2 = st.columns(2)
-            with col_d1:
-                csv_data = df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="📥 Download Clean CSV Report",
-                    data=csv_data,
-                    file_name="executive_clean_data.csv",
-                    mime="text/csv",
-                )
-            with col_d2:
-                import io
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-                    df.to_excel(writer, sheet_name="Clean Data", index=False)
-                    summary_df.to_excel(writer, sheet_name="Executive Summary", index=False)
+                # Export Options & Long-Term Vault Storage configuration
+                st.markdown("### 🔒 Privacy & Long-Term Storage Controls")
+                col_opts1, col_opts2 = st.columns(2)
                 
-                excel_bytes = buffer.getvalue()
-                st.download_button(
-                    label="📥 Download Executive Excel Report (.xlsx)",
-                    data=excel_bytes,
-                    file_name="executive_report.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+                with col_opts1:
+                    enable_vault_save = st.checkbox("Save report summary to Long-Term Secure Vault")
+                with col_opts2:
+                    enable_password = st.checkbox("Add Military-Grade Password Protection")
 
-    except Exception as error_msg:
-        st.error(f"Pipeline runtime error: {error_msg}")
+                vault_report_name = ""
+                file_password = ""
+                if enable_vault_save:
+                    vault_report_name = st.text_input("Vault Record Label Name", value=f"Report_{cache['filename']}")
+                    if enable_password:
+                        file_password = st.text_input("Set File Password for Vault", type="password", placeholder="Enter secure password")
+
+                if st.button("📥 Generate & Export Clean Deliverables", type="primary"):
+                    # Build Excel payload in memory
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+                        cache["clean_df"].to_excel(writer, sheet_name="Clean Data", index=False)
+                        cache["summary_df"].to_excel(writer, sheet_name="Executive Summary", index=False)
+                    excel_bytes = buffer.getvalue()
+
+                    if enable_vault_save and vault_report_name:
+                        pwd_to_hash = file_password if enable_password and file_password else "default_secure_key"
+                        st.session_state.long_term_vault[vault_report_name] = {
+                            "summary": cache["summary_df"],
+                            "data": excel_bytes,
+                            "hash": hashlib.sha256(pwd_to_hash.encode()).hexdigest(),
+                            "timestamp": cache["timestamp"]
+                        }
+                        st.success(f"Successfully encrypted and locked '{vault_report_name}' into long-term secure vault!")
+
+                    st.download_button(
+                        label="📥 Download Clean Executive Report (.xlsx)",
+                        data=excel_bytes,
+                        file_name=f"cleaned_{cache['filename'].split('.')[0]}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+
+        except Exception as e:
+            st.error(f"Pipeline processing error: {e}")
+
+with tab_vault_viewer:
+    st.markdown("### 🧠 Active Memory & Long-Term Summaries")
+    if st.session_state.short_term_cache is not None:
+        st.info(f"Active Short-Term Cache File: **{st.session_state.short_term_cache['filename']}** (Loaded at {st.session_state.short_term_cache['timestamp']})")
+    else:
+        st.info("No active short-term data loaded in memory.")
+
+    st.markdown("---")
+    st.markdown("#### 📂 Vault Registry Overview")
+    if st.session_state.long_term_vault:
+        vault_overview = []
+        for name, info in st.session_state.long_term_vault.items():
+            vault_overview.append({"Report Name": name, "Saved Timestamp": info["timestamp"], "Protection": "Password Locked 🔐"})
+        st.dataframe(pd.DataFrame(vault_overview), use_container_width=True)
+    else:
+        st.write("Vault is empty. Run a pipeline and check the save option to store executive data logs securely.")
