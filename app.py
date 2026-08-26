@@ -1,6 +1,6 @@
 """
-ENTERPRISE MULTI-PLATFORM MARKETING & DATA PIPELINE
-The Ultimate Automated Agency Reporting Suite (Bulletproof Mapping Edition)
+UNIVERSAL ENTERPRISE DATA PIPELINE & EXECUTIVE REPORTING SUITE
+Supports: Digital Marketing Agencies, Real Estate Brokers, Shopify & Skin Clinics
 """
 
 import io
@@ -18,7 +18,7 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 # PAGE CONFIGURATION & STYLING
 # --------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Enterprise Marketing Pipeline & Executive Reporter",
+    page_title="Universal Enterprise Pipeline & Executive Reporter",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -62,7 +62,7 @@ class DataQualityReport:
         return lines
 
 
-class UltimateEnterprisePipeline:
+class UniversalEnterprisePipeline:
     def __init__(self, primary_file, secondary_file=None, mapping=None):
         self.primary_file = primary_file
         self.secondary_file = secondary_file
@@ -83,56 +83,61 @@ class UltimateEnterprisePipeline:
         df = self._load_file(self.primary_file)
         self.report.rows_in = len(df)
 
-        # Optional secondary file merge (Ad Spend + CRM Leads)
+        # Optional multi-source merge (e.g., Shopify Sales + Meta Ads or CRM data)
         if self.secondary_file is not None:
             df2 = self._load_file(self.secondary_file)
             self.report.rows_in += len(df2)
             common_cols = list(set(df.columns).intersection(set(df2.columns)))
             if common_cols:
                 join_key = common_cols[0]
-                df = pd.merge(df, df2, on=join_key, how="outer", suffixes=("_ad", "_crm"))
+                df = pd.merge(df, df2, on=join_key, how="outer", suffixes=("_primary", "_secondary"))
             else:
                 df = pd.concat([df, df2], ignore_index=True, sort=False)
 
-        # Bulletproof Explicit Column Mapping
+        # Bulletproof Explicit Column Mapping with Auto-Fallbacks
         rev_source = self.mapping.get("revenue")
-        if rev_source and rev_source in df.columns:
+        if rev_source and rev_source in df.columns and rev_source != "None":
             df["revenue"] = df[rev_source]
         else:
             for col in df.columns:
-                if any(x in col.lower() for x in ["rev", "sales", "amount", "total"]):
+                if any(x in col.lower() for x in ["rev", "sales", "amount", "total", "price", "value"]):
                     df["revenue"] = df[col]
                     break
 
         if "revenue" not in df.columns:
-            raise ValueError(f"Could not map a valid Revenue column. Available columns in your file: {list(df.columns)}")
+            raise ValueError(f"Could not map a valid Revenue/Sales column. Available columns: {list(df.columns)}")
 
-        # Handle optional mapped columns safely
-        for target_key, map_key in [("order_date", "order_date"), ("spend", "spend"), ("leads", "leads"), ("region", "region")]:
+        # Handle optional mapped fields gracefully across all industries
+        for target_key, map_key in [
+            ("order_date", "order_date"), 
+            ("spend", "spend"), 
+            ("leads", "leads"), 
+            ("region", "region")
+        ]:
             source_col = self.mapping.get(map_key)
             if source_col and source_col in df.columns and source_col != "None":
                 if source_col != target_key:
                     df[target_key] = df[source_col]
 
-        # Clean string columns
+        # Clean string columns to eliminate spacing and hidden artifacts
         for col in df.select_dtypes(include=["object", "string"]).columns:
             df[col] = df[col].astype(str).str.strip().replace({"nan": np.nan, "": np.nan, "None": np.nan})
 
-        # Coerce numerics
+        # Coerce numerics safely across messy currencies and symbols
         for col in ["revenue", "spend", "leads", "quantity", "unit_price"]:
             if col in df.columns:
                 before_na = df[col].isna().sum()
-                cleaned = df[col].astype(str).str.replace(r"[$,€£]", "", regex=True).str.replace(",", "", regex=False).str.strip()
+                cleaned = df[col].astype(str).str.replace(r"[$,€£₹]", "", regex=True).str.replace(",", "", regex=False).str.strip()
                 df[col] = pd.to_numeric(cleaned, errors="coerce")
                 failures = df[col].isna().sum() - before_na
                 if failures > 0:
                     self.report.type_coercion_failures[col] = int(failures)
 
-        # Parse dates safely
+        # Parse dates safely for real estate/e-commerce tracking
         if "order_date" in df.columns:
             df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
 
-        # Agency-grade metric calculations
+        # Compute agency performance metrics if marketing data exists
         if "spend" in df.columns and "revenue" in df.columns:
             df["spend"] = df["spend"].fillna(0)
             df["roas"] = np.where(df["spend"] > 0, df["revenue"] / df["spend"], 0)
@@ -140,7 +145,7 @@ class UltimateEnterprisePipeline:
             df["leads"] = df["leads"].fillna(0)
             df["true_cpa"] = np.where(df["leads"] > 0, df["spend"] / df["leads"], 0)
 
-        # Impute missing values
+        # Impute missing cells to protect reports and charts from breaking
         for col in df.columns:
             n_missing = int(df[col].isna().sum())
             if n_missing == 0:
@@ -152,12 +157,12 @@ class UltimateEnterprisePipeline:
                 df[col] = df[col].fillna("UNKNOWN")
                 self.report.missing_values_filled[col] = n_missing
 
-        # Deduplicate
+        # Strip exact duplicates (essential for high-volume Shopify exports)
         before = len(df)
         df = df.drop_duplicates()
         self.report.duplicates_removed = before - len(df)
 
-        # Outlier flag (IQR method)
+        # Flag outliers using IQR method to protect data integrity (e.g. data entry typos)
         if "revenue" in df.columns and len(df) > 5:
             q1, q3 = df["revenue"].quantile([0.25, 0.75])
             iqr = q3 - q1
@@ -211,7 +216,7 @@ class UltimateEnterprisePipeline:
 
         ws = wb.active
         ws.title = "Executive Summary"
-        ws["A1"] = "Executive Marketing & Performance Summary"
+        ws["A1"] = "Executive Business & Performance Summary"
         ws["A1"].font = header_font
         ws["A1"].fill = header_fill
         ws.merge_cells("A1:D1")
@@ -223,13 +228,13 @@ class UltimateEnterprisePipeline:
         row += 1
 
         metrics = [
-            ("total_revenue", "Total Revenue", currency_fmt),
+            ("total_revenue", "Total Revenue / Sales", currency_fmt),
             ("total_spend", "Total Ad Spend", currency_fmt),
             ("overall_roas", "Blended ROAS", "0.00x"),
-            ("total_leads", "Total Leads Generated", None),
+            ("total_leads", "Total Leads / Volume", None),
             ("blended_cpa", "Blended CPA", currency_fmt),
             ("avg_order_value", "Average Order Value", currency_fmt),
-            ("order_count", "Total Clean Transactions", None)
+            ("order_count", "Total Clean Records", None)
         ]
         for key, label, fmt in metrics:
             if key in summary:
@@ -318,16 +323,16 @@ class UltimateEnterprisePipeline:
         return output.getvalue()
 
 
-# STREAMLIT UI INTERFACE
-st.sidebar.title("⚡ Agency Pipeline Studio")
+# STREAMLIT USER INTERFACE
+st.sidebar.title("⚡ Enterprise Studio")
 st.sidebar.markdown("---")
-st.sidebar.info("Upload multi-platform marketing exports, map custom schemas, compute ROAS/CPA, and generate executive Excel reports instantly.")
+st.sidebar.info("Universal data janitor and executive report builder for agencies, real estate brokers, and e-commerce stores.")
 st.sidebar.markdown("### Developer")
 st.sidebar.write("**Ishika Tomar**")
 st.sidebar.markdown("[🔗 Connect on LinkedIn](https://www.linkedin.com/in/ishika-tomar-70262a2a5/)")
 
-st.title("📊 Enterprise Multi-Platform Marketing Reporting Pipeline")
-st.markdown("Transform messy ad performance exports and CRM sales sheets into polished, executive-ready Excel reports with automated ROAS, CPA, and trend charts.")
+st.title("📊 Universal Enterprise Business & Marketing Pipeline")
+st.markdown("Transform messy exports from Shopify, Facebook Ads, Real Estate CRMs, or Skin Clinic booking sheets into polished, executive-ready Excel reports instantly.")
 
 col_up1, col_up2 = st.columns(2)
 with col_up1:
@@ -345,18 +350,18 @@ if primary_file is not None:
             cols = list(temp_df.columns)
 
         st.markdown("### 🗺️ Interactive Column Mapper")
-        st.info("Map your file columns to standard reporting fields so the pipeline never breaks:")
+        st.info("Map your file columns to standard reporting fields so the pipeline processes seamlessly:")
         
         m1, m2, m3 = st.columns(3)
         with m1:
-            def_rev = next((c for c in cols if any(x in c.lower() for x in ["rev", "sales", "amount", "total"])), cols[0])
+            def_rev = next((c for c in cols if any(x in c.lower() for x in ["rev", "sales", "amount", "total", "price", "value"])), cols[0])
             rev_col = st.selectbox("Revenue / Sales Column (Required)", cols, index=cols.index(def_rev) if def_rev in cols else 0)
             date_col = st.selectbox("Date Column (Optional)", ["None"] + cols)
         with m2:
             spend_col = st.selectbox("Ad Spend Column [Optional]", ["None"] + cols)
             leads_col = st.selectbox("Leads / Quantity Column [Optional]", ["None"] + cols)
         with m3:
-            region_col = st.selectbox("Region / Group Column [Optional]", ["None"] + cols)
+            region_col = st.selectbox("Region / Group / Category Column [Optional]", ["None"] + cols)
 
         mapping = {
             "revenue": rev_col,
@@ -368,8 +373,8 @@ if primary_file is not None:
 
         st.markdown("---")
         if st.button("🚀 Execute Enterprise Pipeline & Generate Report"):
-            with st.spinner("Processing data, computing attribution metrics, and formatting workbook..."):
-                pipeline = UltimateEnterprisePipeline(primary_file, secondary_file, mapping)
+            with st.spinner("Processing data, cleaning anomalies, and formatting executive workbook..."):
+                pipeline = UniversalEnterprisePipeline(primary_file, secondary_file, mapping)
                 df_clean = pipeline.process()
                 summary = pipeline.analyze()
                 excel_bytes = pipeline.build_excel_bytes(summary)
@@ -396,14 +401,14 @@ if primary_file is not None:
                 if "revenue_by_group" in summary:
                     col_a, col_b = st.columns(2)
                     with col_a:
-                        st.write(f"**Revenue Breakdown by Group**")
+                        st.write(f"**Revenue Breakdown by {summary.get('group_column_name', 'Group').title()}**")
                         st.dataframe(summary["revenue_by_group"], use_container_width=True)
                     with col_b:
                         if "monthly_revenue" in summary and not summary["monthly_revenue"].empty:
                             st.write("**Monthly Revenue Trend**")
                             st.line_chart(summary["monthly_revenue"])
                 else:
-                    st.info("Clean dataset processed successfully. Map a grouping column for regional distribution charts.")
+                    st.info("Clean dataset processed successfully. Map a grouping/region column to view category distribution charts.")
 
             with tab2:
                 st.subheader("Data Health & Integrity Audit Log")
@@ -419,7 +424,7 @@ if primary_file is not None:
             st.download_button(
                 label="Download Formatted Executive Report (.xlsx)",
                 data=excel_bytes,
-                file_name="enterprise_marketing_report.xlsx",
+                file_name="universal_enterprise_report.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
@@ -428,6 +433,6 @@ if primary_file is not None:
 else:
     st.markdown(
         """
-        > **Get Started:** Upload your primary sales/revenue export. Optionally upload an ad spend or CRM lead sheet alongside it to automatically calculate blended ROAS and CPA!
+        > **Get Started:** Upload your primary data file (Shopify export, Real Estate sheet, or Agency ad report). Optionally upload a secondary file to merge them instantly!
         """
     )
