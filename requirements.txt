@@ -1,4 +1,3 @@
-# Shared dependencies for all five apps
 pandas
 numpy
 openpyxl
