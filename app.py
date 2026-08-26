@@ -119,22 +119,23 @@ class UniversalEnterprisePipeline:
                 if source_col != target_key:
                     df[target_key] = df[source_col]
 
-        # Clean string columns
+        # Clean string columns and standardize text casing (fixes North vs north split)
         for col in df.select_dtypes(include=["object", "string"]).columns:
             df[col] = df[col].astype(str).str.strip().replace({"nan": np.nan, "": np.nan, "None": np.nan})
+            if col == "region" or col == self.mapping.get("region"):
+                df[col] = df[col].str.title()
 
-        # AGGRESSIVE NUMERIC COERCION (Fixes the $0.00 bug by cleaning symbols & parsing correctly)
+        # Aggressive Numeric Coercion
         for col in ["revenue", "spend", "leads", "quantity", "unit_price"]:
             if col in df.columns:
                 before_na = df[col].isna().sum()
-                # Remove currency symbols, commas, and whitespace completely
                 cleaned = df[col].astype(str).str.replace(r"[$,€£₹USD\s]", "", regex=True).str.replace(",", "", regex=False)
                 df[col] = pd.to_numeric(cleaned, errors="coerce")
                 failures = df[col].isna().sum() - before_na
                 if failures > 0:
                     self.report.type_coercion_failures[col] = int(failures)
 
-        # Fallback safeguard: If revenue became all NaNs/zeros due to mapping error, try finding the first numeric column
+        # Fallback safeguard
         if df["revenue"].sum() == 0:
             for c in df.select_dtypes(include=[np.number]).columns:
                 if c != "revenue":
@@ -159,7 +160,7 @@ class UniversalEnterprisePipeline:
             if n_missing == 0:
                 continue
             if pd.api.types.is_numeric_dtype(df[col]):
-                df[col] = df[col].fillna(0.0) # Default to 0 for missing numbers
+                df[col] = df[col].fillna(0.0)
                 self.report.missing_values_filled[col] = n_missing
             elif col != "order_date":
                 df[col] = df[col].fillna("UNKNOWN")
