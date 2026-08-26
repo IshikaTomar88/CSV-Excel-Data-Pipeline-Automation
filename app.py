@@ -81,6 +81,11 @@ class UniversalEnterprisePipeline:
 
     def process(self) -> pd.DataFrame:
         df = self._load_file(self.primary_file)
+        
+        # Guard against uploading the output report itself
+        if "Metric" in df.columns and "Value" in df.columns:
+            raise ValueError("You uploaded an already-generated executive report! Please upload your raw data export file (e.g., Shopify, CRM, or Ads CSV/Excel).")
+
         self.report.rows_in = len(df)
 
         # Optional multi-source merge
@@ -119,7 +124,7 @@ class UniversalEnterprisePipeline:
                 if source_col != target_key:
                     df[target_key] = df[source_col]
 
-        # Clean string columns and standardize text casing (fixes North vs north split)
+        # Clean string columns and standardize text casing
         for col in df.select_dtypes(include=["object", "string"]).columns:
             df[col] = df[col].astype(str).str.strip().replace({"nan": np.nan, "": np.nan, "None": np.nan})
             if col == "region" or col == self.mapping.get("region"):
@@ -134,13 +139,6 @@ class UniversalEnterprisePipeline:
                 failures = df[col].isna().sum() - before_na
                 if failures > 0:
                     self.report.type_coercion_failures[col] = int(failures)
-
-        # Fallback safeguard
-        if df["revenue"].sum() == 0:
-            for c in df.select_dtypes(include=[np.number]).columns:
-                if c != "revenue":
-                    df["revenue"] = df[c]
-                    break
 
         # Parse dates safely
         if "order_date" in df.columns:
@@ -354,95 +352,99 @@ with col_up2:
 if primary_file is not None:
     try:
         temp_df = pd.read_csv(primary_file) if primary_file.name.endswith(".csv") else pd.read_excel(primary_file)
-        if secondary_file is not None:
-            temp_df2 = pd.read_csv(secondary_file) if secondary_file.name.endswith(".csv") else pd.read_excel(secondary_file)
-            cols = list(set(temp_df.columns).union(set(temp_df2.columns)))
-        else:
-            cols = list(temp_df.columns)
-
-        st.markdown("### 🗺️ Interactive Column Mapper")
-        st.info("Map your file columns to standard reporting fields so the pipeline processes seamlessly:")
         
-        def_rev_idx = 0
-        for idx, c in enumerate(cols):
-            if any(x in c.lower() for x in ["rev", "sales", "amount", "total", "price", "value"]):
-                def_rev_idx = idx
-                break
+        if "Metric" in temp_df.columns and "Value" in temp_df.columns:
+            st.error("⚠️ You uploaded an already-generated executive report summary file! Please upload your original raw transactional dataset (e.g., Shopify orders export, CRM lead list, or ad performance CSV).")
+        else:
+            if secondary_file is not None:
+                temp_df2 = pd.read_csv(secondary_file) if secondary_file.name.endswith(".csv") else pd.read_excel(secondary_file)
+                cols = list(set(temp_df.columns).union(set(temp_df2.columns)))
+            else:
+                cols = list(temp_df.columns)
 
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            rev_col = st.selectbox("Revenue / Sales Column (Required)", cols, index=def_rev_idx)
-            date_col = st.selectbox("Date Column (Optional)", ["None"] + cols)
-        with m2:
-            spend_col = st.selectbox("Ad Spend Column [Optional]", ["None"] + cols)
-            leads_col = st.selectbox("Leads / Quantity Column [Optional]", ["None"] + cols)
-        with m3:
-            region_col = st.selectbox("Region / Group / Category Column [Optional]", ["None"] + cols)
+            st.markdown("### 🗺️ Interactive Column Mapper")
+            st.info("Map your file columns to standard reporting fields so the pipeline processes seamlessly:")
+            
+            def_rev_idx = 0
+            for idx, c in enumerate(cols):
+                if any(x in c.lower() for x in ["rev", "sales", "amount", "total", "price", "value"]):
+                    def_rev_idx = idx
+                    break
 
-        mapping = {
-            "revenue": rev_col,
-            "order_date": None if date_col == "None" else date_col,
-            "spend": None if spend_col == "None" else spend_col,
-            "leads": None if leads_col == "None" else leads_col,
-            "region": None if region_col == "None" else region_col
-        }
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                rev_col = st.selectbox("Revenue / Sales Column (Required)", cols, index=def_rev_idx)
+                date_col = st.selectbox("Date Column (Optional)", ["None"] + cols)
+            with m2:
+                spend_col = st.selectbox("Ad Spend Column [Optional]", ["None"] + cols)
+                leads_col = st.selectbox("Leads / Quantity Column [Optional]", ["None"] + cols)
+            with m3:
+                region_col = st.selectbox("Region / Group / Category Column [Optional]", ["None"] + cols)
 
-        st.markdown("---")
-        if st.button("🚀 Execute Enterprise Pipeline & Generate Report"):
-            with st.spinner("Processing data, cleaning anomalies, and formatting executive workbook..."):
-                pipeline = UniversalEnterprisePipeline(primary_file, secondary_file, mapping)
-                df_clean = pipeline.process()
-                summary = pipeline.analyze()
-                excel_bytes = pipeline.build_excel_bytes(summary)
-
-            st.success("✅ Pipeline Executed Successfully!")
-
-            c1, c2, c3, c4, c5 = st.columns(5)
-            with c1:
-                st.metric("Total Revenue", f"${summary.get('total_revenue', 0):,.2f}")
-            with c2:
-                st.metric("Total Ad Spend", f"${summary.get('total_spend', 0):,.2f}")
-            with c3:
-                st.metric("Blended ROAS", f"{summary.get('overall_roas', 0):.2f}x")
-            with c4:
-                st.metric("Blended CPA", f"${summary.get('blended_cpa', 0):,.2f}")
-            with c5:
-                st.metric("Outliers Flagged", f"{pipeline.report.outliers_flagged}" if 'pipeline' in locals() else "0")
+            mapping = {
+                "revenue": rev_col,
+                "order_date": None if date_col == "None" else date_col,
+                "spend": None if spend_col == "None" else spend_col,
+                "leads": None if leads_col == "None" else leads_col,
+                "region": None if region_col == "None" else region_col
+            }
 
             st.markdown("---")
-            tab1, tab2, tab3 = st.tabs(["📊 Performance Breakdown", "🧹 Data Quality Audit Log", "🔍 Cleaned Dataset Preview"])
+            if st.button("🚀 Execute Enterprise Pipeline & Generate Report"):
+                with st.spinner("Processing data, cleaning anomalies, and formatting executive workbook..."):
+                    pipeline = UniversalEnterprisePipeline(primary_file, secondary_file, mapping)
+                    df_clean = pipeline.process()
+                    summary = pipeline.analyze()
+                    excel_bytes = pipeline.build_excel_bytes(summary)
 
-            with tab1:
-                st.subheader("Executive Performance Overview")
-                if "revenue_by_group" in summary:
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.write(f"**Revenue Breakdown by {summary.get('group_column_name', 'Group').title()}**")
-                        st.dataframe(summary["revenue_by_group"], use_container_width=True)
-                    with col_b:
-                        if "monthly_revenue" in summary and not summary["monthly_revenue"].empty:
-                            st.write("**Monthly Revenue Trend**")
-                            st.line_chart(summary["monthly_revenue"])
-                else:
-                    st.info("Clean dataset processed successfully. Map a grouping/region column to view category distribution charts.")
+                st.success("✅ Pipeline Executed Successfully!")
 
-            with tab2:
-                st.subheader("Data Health & Integrity Audit Log")
-                for line in pipeline.report.summary_lines():
-                    st.text(line)
+                c1, c2, c3, c4, c5 = st.columns(5)
+                with c1:
+                    st.metric("Total Revenue", f"${summary.get('total_revenue', 0):,.2f}")
+                with c2:
+                    st.metric("Total Ad Spend", f"${summary.get('total_spend', 0):,.2f}")
+                with c3:
+                    st.metric("Blended ROAS", f"{summary.get('overall_roas', 0):.2f}x")
+                with c4:
+                    st.metric("Blended CPA", f"${summary.get('blended_cpa', 0):,.2f}")
+                with c5:
+                    st.metric("Outliers Flagged", f"{pipeline.report.outliers_flagged}" if 'pipeline' in locals() else "0")
 
-            with tab3:
-                st.subheader("Cleaned Dataset Preview")
-                st.dataframe(df_clean, use_container_width=True)
+                st.markdown("---")
+                tab1, tab2, tab3 = st.tabs(["📊 Performance Breakdown", "🧹 Data Quality Audit Log", "🔍 Cleaned Dataset Preview"])
 
-            st.markdown("---")
-            st.subheader("📥 Export Client Deliverable")
-            st.download_button(
-                label="Download Formatted Executive Report (.xlsx)",
-                data=excel_bytes,
-                file_name="universal_enterprise_report.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+                with tab1:
+                    st.subheader("Executive Performance Overview")
+                    if "revenue_by_group" in summary:
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            st.write(f"**Revenue Breakdown by {summary.get('group_column_name', 'Group').title()}**")
+                            st.dataframe(summary["revenue_by_group"], use_container_width=True)
+                        with col_b:
+                            if "monthly_revenue" in summary and not summary["monthly_revenue"].empty:
+                                st.write("**Monthly Revenue Trend**")
+                                st.line_chart(summary["monthly_revenue"])
+                    else:
+                        st.info("Clean dataset processed successfully. Map a grouping/region column to view category distribution charts.")
+
+                with tab2:
+                    st.subheader("Data Health & Integrity Audit Log")
+                    for line in pipeline.report.summary_lines():
+                        st.text(line)
+
+                with tab3:
+                    st.subheader("Cleaned Dataset Preview")
+                    st.dataframe(df_clean, use_container_width=True)
+
+                st.markdown("---")
+                st.subheader("📥 Export Client Deliverable")
+                st.download_button(
+                    label="Download Formatted Executive Report (.xlsx)",
+                    data=excel_bytes,
+                    file_name="universal_enterprise_report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
     except Exception as e:
         st.error(f"Pipeline Error: {str(e)}")
