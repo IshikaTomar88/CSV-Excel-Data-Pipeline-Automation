@@ -1,6 +1,12 @@
-streamlit
+# Shared dependencies for all five apps
 pandas
 numpy
 openpyxl
 xlsxwriter
+streamlit
 requests
+beautifulsoup4
+lxml
+plotly
+opencv-python-headless
+cryptography
