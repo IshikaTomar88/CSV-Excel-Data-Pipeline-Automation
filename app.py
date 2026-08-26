@@ -1,337 +1,271 @@
 """
-================================================================================
- SERVICE: Enterprise Zero-Touch Data Pipeline & Secure Memory Suite
-================================================================================
+ ZERO-TOUCH DATA PIPELINE — Messy Raw Data -> Executive Excel Report
 """
 
-import hashlib
-import io
-import json
-from datetime import datetime
+from __future__ import annotations
+
+import re
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import streamlit as st
+from openpyxl import Workbook
+from openpyxl.chart import BarChart, Reference
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.dataframe import dataframe_to_rows
+
+# --------------------------------------------------------------------------
+# CONFIG
+# --------------------------------------------------------------------------
+INPUT_FILE = "sample_data/messy_sales_export.csv"
+OUTPUT_XLSX = "executive_report.xlsx"
+DATE_COLUMNS = ["order_date"]
+NUMERIC_COLUMNS = ["quantity", "unit_price", "revenue"]
+KEY_GROUP_COLUMN = "region"          # what to summarize revenue by
+REVENUE_COLUMN = "revenue"
 
 
-# PAGE CONFIGURATION & MODERN EXECUTIVE STYLING
+@dataclass
+class DataQualityReport:
+    rows_in: int = 0
+    rows_out: int = 0
+    duplicates_removed: int = 0
+    missing_values_filled: dict = field(default_factory=dict)
+    type_coercion_failures: dict = field(default_factory=dict)
+    outliers_flagged: int = 0
 
-st.set_page_config(
-    page_title="Enterprise Data Pipeline & Secure Vault",
-    page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.markdown(
-    """
-    <style>
-        .main-title { font-size: 2.5rem; font-weight: 800; color: #0F172A; letter-spacing: -0.025em; }
-        .sub-title { font-size: 1.1rem; color: #475569; font-weight: 400; }
-        .card { background: #F8FAFC; border: 1px solid #E2E8F0; padding: 20px; border-radius: 12px; margin-bottom: 15px; }
-        .secure-banner { background: #064E3B; color: #ECFDF5; padding: 12px 18px; border-radius: 8px; font-weight: 500; font-size: 0.95rem; display: flex; align-items: center; gap: 10px; }
-        .stButton>button { border-radius: 8px; font-weight: 600; padding: 0.5rem 1rem; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# INITIALIZE ADVANCED MEMORY MANAGER IN SESSION STATE
-
-if "short_term_cache" not in st.session_state:
-    st.session_state.short_term_cache = None  # Active session cleaned data dataframe
-
-if "long_term_vault" not in st.session_state:
-    # Stores encrypted or password-locked reports: { report_name: { "summary": df, "data": bytes, "hash": str, "timestamp": str } }
-    st.session_state.long_term_vault = {}
+    def summary_lines(self) -> list[str]:
+        lines = [
+            f"Rows ingested: {self.rows_in}",
+            f"Rows in final clean dataset: {self.rows_out}",
+            f"Duplicate rows removed: {self.duplicates_removed}",
+            f"Outlier rows flagged for review: {self.outliers_flagged}",
+        ]
+        for col, n in self.missing_values_filled.items():
+            lines.append(f"  - '{col}': {n} missing values filled/imputed")
+        for col, n in self.type_coercion_failures.items():
+            lines.append(f"  - '{col}': {n} values could not be parsed and were set to NaN")
+        return lines
 
 
-# CONFIGURATION CONSTANTS & MAPPINGS
+class DataPipeline:
+    def __init__(self, input_path: str):
+        self.input_path = Path(input_path)
+        self.report = DataQualityReport()
+        self.df_raw: pd.DataFrame | None = None
+        self.df_clean: pd.DataFrame | None = None
 
-COLUMN_MAP = {
-    "cust name": "customer_name",
-    "customer name": "customer_name",
-    "customername": "customer_name",
-    "order date": "order_date",
-    "orderdate": "order_date",
-    "amt": "amount",
-    "amount ($)": "amount",
-    "total": "amount",
-    "qty": "quantity",
-    "quantity ordered": "quantity",
-    "region/state": "region",
-}
+    # ------------------------------------------------------------- ingest
+    def ingest(self) -> pd.DataFrame:
+        if self.input_path.suffix.lower() == ".csv":
+            df = pd.read_csv(self.input_path)
+        else:
+            df = pd.read_excel(self.input_path)
+        self.df_raw = df
+        self.report.rows_in = len(df)
+        return df
 
-CLEANING_RULES = {
-    "customer_name": {"strip": True, "title_case": True},
-    "order_date": {"parse_date": True},
-    "amount": {"currency_to_float": True, "min_valid": 0},
-    "quantity": {"to_int": True, "min_valid": 0},
-    "region": {"strip": True, "title_case": True},
-}
+    # -------------------------------------------------------------- clean
+    def clean(self) -> pd.DataFrame:
+        df = self.df_raw.copy()
 
-MISSING_VALUE_STRATEGY = {
-    "customer_name": "fill_unknown",
-    "order_date": "drop_row",
-    "amount": "fill_mean",
-    "quantity": "fill_zero",
-    "region": "fill_unknown",
-}
+        # 1. Normalize column names: "Order Date " -> "order_date"
+        df.columns = [
+            re.sub(r"\s+", "_", c.strip().lower()) for c in df.columns
+        ]
 
-
-# CORE ETL TRANSFORMATION & VECTORIZED ENGINE
-
-def load_raw_file(uploaded_file) -> pd.DataFrame:
-    suffix = Path(uploaded_file.name).suffix.lower()
-    if suffix == ".csv":
-        return pd.read_csv(uploaded_file)
-    elif suffix in (".xlsx", ".xls"):
-        return pd.read_excel(uploaded_file)
-    elif suffix == ".json":
-        return pd.json_normalize(json.load(uploaded_file))
-    else:
-        raise ValueError(f"Unsupported format: {suffix}")
-
-
-def normalize_columns(df: pd.DataFrame, column_map: dict) -> pd.DataFrame:
-    lowered = {c: c.strip().lower() for c in df.columns}
-    df = df.rename(columns=lowered)
-    df = df.rename(columns={k: v for k, v in column_map.items() if k in df.columns})
-    return df
-
-
-def _clean_currency_series(s: pd.Series) -> pd.Series:
-    cleaned = s.astype(str).str.replace(r"[^\d.\-]", "", regex=True).replace("", np.nan)
-    return pd.to_numeric(cleaned, errors="coerce")
-
-
-def clean_data(df: pd.DataFrame, rules: dict) -> pd.DataFrame:
-    for col, rule in rules.items():
-        if col not in df.columns:
-            continue
-        if rule.get("strip"):
+        # 2. Strip whitespace from all string/object columns
+        for col in df.select_dtypes(include=["object", "string"]).columns:
             df[col] = df[col].astype(str).str.strip()
-        if rule.get("title_case"):
-            df[col] = df[col].astype(str).str.title()
-        if rule.get("parse_date"):
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-        if rule.get("currency_to_float"):
-            df[col] = _clean_currency_series(df[col])
-        if rule.get("to_int"):
-            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
-        if "min_valid" in rule:
-            invalid_mask = df[col] < rule["min_valid"]
-            df.loc[invalid_mask, col] = np.nan
-    return df
+            df[col] = df[col].replace({"nan": np.nan, "": np.nan, "None": np.nan})
 
+        # 3. Coerce numeric columns (strips currency symbols/commas first)
+        for col in NUMERIC_COLUMNS:
+            if col not in df.columns:
+                continue
+            before_na = df[col].isna().sum()
+            cleaned = (
+                df[col].astype(str)
+                .str.replace(r"[$,€£]", "", regex=True)
+                .str.replace(",", "", regex=False)
+                .str.strip()
+            )
+            df[col] = pd.to_numeric(cleaned, errors="coerce")
+            failures = df[col].isna().sum() - before_na
+            if failures > 0:
+                self.report.type_coercion_failures[col] = int(failures)
 
-def handle_missing_values(df: pd.DataFrame, strategy: dict) -> pd.DataFrame:
-    df = df.copy()
-    for col, method in strategy.items():
-        if col not in df.columns:
-            continue
-        if method == "drop_row":
-            df = df.dropna(subset=[col])
-        elif method == "fill_zero":
-            df[col] = df[col].fillna(0)
-        elif method == "fill_mean":
-            if pd.api.types.is_numeric_dtype(df[col]):
-                df[col] = df[col].fillna(df[col].mean())
-        elif method == "fill_unknown":
-            df[col] = df[col].fillna("Unknown")
-    return df
+        # 4. Parse dates
+        for col in DATE_COLUMNS:
+            if col not in df.columns:
+                continue
+            df[col] = pd.to_datetime(df[col], errors="coerce", format="mixed")
 
+        # 5. Fill / flag missing values (strategy differs by column type)
+        for col in df.columns:
+            n_missing = int(df[col].isna().sum())
+            if n_missing == 0:
+                continue
+            if col in NUMERIC_COLUMNS:
+                fill_value = df[col].median()
+                df[col] = df[col].fillna(fill_value)
+                self.report.missing_values_filled[col] = n_missing
+            elif col not in DATE_COLUMNS:
+                df[col] = df[col].fillna("UNKNOWN")
+                self.report.missing_values_filled[col] = n_missing
 
-def remove_duplicates(df: pd.DataFrame) -> pd.DataFrame:
-    subset_cols = [c for c in ["customer_name", "order_date", "amount"] if c in df.columns]
-    return df.drop_duplicates(subset=subset_cols if subset_cols else None)
+        # 6. Recompute revenue if missing/inconsistent (quantity * unit_price)
+        if {"quantity", "unit_price"}.issubset(df.columns):
+            expected_revenue = df["quantity"] * df["unit_price"]
+            if "revenue" in df.columns:
+                mismatch = (df["revenue"] - expected_revenue).abs() > 0.01
+                df.loc[mismatch, "revenue"] = expected_revenue[mismatch]
+            else:
+                df["revenue"] = expected_revenue
 
+        # 7. Remove exact duplicate rows
+        before = len(df)
+        df = df.drop_duplicates()
+        self.report.duplicates_removed = before - len(df)
 
-def flag_outliers(df: pd.DataFrame, col: str = "amount", z_thresh: float = 3.0) -> pd.DataFrame:
-    if col not in df.columns or not pd.api.types.is_numeric_dtype(df[col]):
-        df["is_outlier"] = False
+        # 8. Flag statistical outliers in revenue (IQR method) — not removed,
+        #    just flagged, since a human should decide if a $50k sale is real.
+        if REVENUE_COLUMN in df.columns:
+            q1, q3 = df[REVENUE_COLUMN].quantile([0.25, 0.75])
+            iqr = q3 - q1
+            lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+            df["flag_outlier"] = ~df[REVENUE_COLUMN].between(lower, upper)
+            self.report.outliers_flagged = int(df["flag_outlier"].sum())
+
+        df = df.reset_index(drop=True)
+        self.report.rows_out = len(df)
+        self.df_clean = df
         return df
-    mean, std = df[col].mean(), df[col].std()
-    if std == 0 or pd.isna(std):
-        df["is_outlier"] = False
-        return df
-    z_scores = (df[col] - mean) / std
-    df["is_outlier"] = z_scores.abs() > z_thresh
-    return df
+
+    # ------------------------------------------------------------ analyze
+    def analyze(self) -> dict:
+        df = self.df_clean
+        summary = {}
+        if REVENUE_COLUMN in df.columns:
+            summary["total_revenue"] = round(float(df[REVENUE_COLUMN].sum()), 2)
+            summary["avg_order_value"] = round(float(df[REVENUE_COLUMN].mean()), 2)
+        if KEY_GROUP_COLUMN in df.columns and REVENUE_COLUMN in df.columns:
+            by_group = (
+                df.groupby(KEY_GROUP_COLUMN)[REVENUE_COLUMN]
+                .sum().sort_values(ascending=False).round(2)
+            )
+            summary["revenue_by_group"] = by_group
+        if "order_date" in df.columns:
+            monthly = (
+                df.dropna(subset=["order_date"])
+                .set_index("order_date")[REVENUE_COLUMN]
+                .resample("ME").sum().round(2)
+            )
+            summary["monthly_revenue"] = monthly
+        return summary
+
+    # ------------------------------------------------------------- export
+    def export_excel(self, summary: dict, out_path: str):
+        wb = Workbook()
+
+        # ---- Sheet 1: Executive Summary ----
+        ws = wb.active
+        ws.title = "Summary"
+        header_font = Font(bold=True, size=14, color="FFFFFF")
+        header_fill = PatternFill("solid", fgColor="2F5496")
+        ws["A1"] = "Executive Data Summary"
+        ws["A1"].font = header_font
+        ws["A1"].fill = header_fill
+        ws.merge_cells("A1:C1")
+
+        row = 3
+        ws[f"A{row}"] = "Metric"; ws[f"B{row}"] = "Value"
+        for c in ("A", "B"):
+            ws[f"{c}{row}"].font = Font(bold=True)
+        row += 1
+        for key in ("total_revenue", "avg_order_value"):
+            if key in summary:
+                ws[f"A{row}"] = key.replace("_", " ").title()
+                ws[f"B{row}"] = summary[key]
+                row += 1
+
+        if "revenue_by_group" in summary:
+            row += 1
+            ws[f"A{row}"] = f"Revenue by {KEY_GROUP_COLUMN.title()}"
+            ws[f"A{row}"].font = Font(bold=True)
+            row += 1
+            chart_start_row = row
+            for group_name, val in summary["revenue_by_group"].items():
+                ws[f"A{row}"] = group_name
+                ws[f"B{row}"] = val
+                row += 1
+            chart_end_row = row - 1
+
+            chart = BarChart()
+            chart.title = f"Revenue by {KEY_GROUP_COLUMN.title()}"
+            chart.y_axis.title = "Revenue"
+            data = Reference(ws, min_col=2, min_row=chart_start_row, max_row=chart_end_row)
+            cats = Reference(ws, min_col=1, min_row=chart_start_row, max_row=chart_end_row)
+            chart.add_data(data, titles_from_data=False)
+            chart.set_categories(cats)
+            ws.add_chart(chart, f"D{chart_start_row}")
+
+        for col, width in zip("ABCD", (28, 16, 16, 16)):
+            ws.column_dimensions[col].width = width
+
+        # ---- Sheet 2: Data Quality Report ----
+        ws2 = wb.create_sheet("Data Quality Report")
+        ws2["A1"] = "Data Quality Report"
+        ws2["A1"].font = header_font
+        ws2["A1"].fill = header_fill
+        ws2.merge_cells("A1:B1")
+        for i, line in enumerate(self.report.summary_lines(), start=3):
+            ws2[f"A{i}"] = line
+        ws2.column_dimensions["A"].width = 70
+
+        # ---- Sheet 3: Cleaned Data ----
+        ws3 = wb.create_sheet("Cleaned Data")
+        for r in dataframe_to_rows(self.df_clean, index=False, header=True):
+            ws3.append(r)
+        for cell in ws3[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="2F5496")
+        for i, col in enumerate(self.df_clean.columns, start=1):
+            ws3.column_dimensions[get_column_letter(i)].width = 16
+
+        wb.save(out_path)
+        print(f"\n✅ Executive report written to: {out_path}")
+
+    # ---------------------------------------------------------------- run
+    def run(self):
+        print("Ingesting raw data...")
+        self.ingest()
+        print(f"  -> {self.report.rows_in} rows loaded")
+
+        print("Cleaning data...")
+        self.clean()
+        print(f"  -> {self.report.rows_out} clean rows "
+              f"({self.report.duplicates_removed} duplicates removed)")
+
+        print("Analyzing...")
+        summary = self.analyze()
+
+        print("Exporting formatted Excel workbook...")
+        self.export_excel(summary, OUTPUT_XLSX)
+
+        print("\n" + "=" * 60)
+        print("DATA QUALITY REPORT")
+        for line in self.report.summary_lines():
+            print(" ", line)
+        print("=" * 60)
 
 
-def build_executive_summary(df: pd.DataFrame) -> pd.DataFrame:
-    summary = {
-        "Total Records Processed": len(df),
-        "Total Revenue": round(df["amount"].sum(), 2) if "amount" in df else 0.0,
-        "Average Order Value": round(df["amount"].mean(), 2) if "amount" in df else 0.0,
-        "Unique Customers": df["customer_name"].nunique() if "customer_name" in df else 0,
-        "Outliers Flagged (Z-Score)": int(df["is_outlier"].sum()) if "is_outlier" in df else 0,
-    }
-    return pd.DataFrame(list(summary.items()), columns=["Executive Metric", "Value"])
-
-
-# SIDEBAR — ADVANCED MEMORY & SECURE VAULT MANAGER
-
-with st.sidebar:
-    st.markdown("### 🧠 Memory & Vault Manager")
-    st.markdown("Control short-term operational cache, long-term summaries, and military-grade encryption keys.")
-    st.divider()
-
-    st.markdown("#### 📦 Long-Term Secure Vault")
-    if st.session_state.long_term_vault:
-        st.success(f"{len(st.session_state.long_term_vault)} report(s) safely vaulted.")
-        selected_vault_item = st.selectbox("Select Vault Report", list(st.session_state.long_term_vault.keys()))
-        
-        vault_pwd_input = st.text_input("Enter Vault File Password", type="password", key="vault_unlock_pwd")
-        
-        col_v1, col_v2 = st.columns(2)
-        with col_v1:
-            if st.button("Unlock & Download"):
-                record = st.session_state.long_term_vault[selected_vault_item]
-                hashed_input = hashlib.sha256(vault_pwd_input.encode()).hexdigest()
-                if hashed_input == record["hash"]:
-                    st.success("Access Granted!")
-                    st.download_button(
-                        "📥 Get Encrypted Excel",
-                        data=record["data"],
-                        file_name=f"secure_{selected_vault_item}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                else:
-                    st.error("Incorrect Vault Password!")
-        with col_v2:
-            if st.button("Purge Item"):
-                del st.session_state.long_term_vault[selected_vault_item]
-                st.rerun()
-    else:
-        st.info("Vault is currently empty.")
-
-    st.divider()
-    if st.button("🧹 Clear All Session & Cache Memory", type="secondary"):
-        st.session_state.short_term_cache = None
-        st.session_state.long_term_vault = {}
-        st.rerun()
-
-
-# MAIN INTERFACE
-
-st.markdown('<p class="main-title">⚡ Zero-Touch Data Pipeline & Secure Vault</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">High-performance vector cleaning suite backed by a privacy-first memory manager and optional password protection.</p>', unsafe_allow_html=True)
-st.markdown("---")
-
-# Privacy Security Notice Banner
-st.markdown(
-    """
-    <div class="secure-banner">
-        🛡️ <b>Strict Zero-Retention Privacy:</b> All raw files are parsed in isolated memory. Data is never written to public disks unless you explicitly choose to save summaries or encrypt files into your private session vault.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-st.markdown("<br>", unsafe_allow_html=True)
-
-# Main Application Tabs
-tab_pipeline, tab_vault_viewer = st.tabs(["🚀 Pipeline Execution", "📂 Active Memory & Summary Logs"])
-
-with tab_pipeline:
-    uploaded_file = st.file_uploader("Upload Raw Business Dataset (.csv, .xlsx, .xls, .json)", type=["csv", "xlsx", "xls", "json"])
-
-    if uploaded_file is not None:
-        try:
-            with st.spinner("Extracting file into secure memory..."):
-                df_raw = load_raw_file(uploaded_file)
-
-            st.write(f"### 📥 Raw Dataset Preview ({len(df_raw):,} records found)")
-            st.dataframe(df_raw.head(3), use_container_width=True)
-
-            if st.button("✨ Run Vectorized Cleaning Pipeline", type="primary"):
-                with st.spinner("Executing high-speed Pandas/NumPy cleaning pipeline..."):
-                    df = normalize_columns(df_raw, COLUMN_MAP)
-                    df = clean_data(df, CLEANING_RULES)
-                    df = handle_missing_values(df, MISSING_VALUE_STRATEGY)
-                    df = remove_duplicates(df)
-                    df = flag_outliers(df, col="amount" if "amount" in df else df.columns[0])
-                    summary_df = build_executive_summary(df)
-
-                # Save to short-term session memory manager
-                st.session_state.short_term_cache = {
-                    "filename": uploaded_file.name,
-                    "clean_df": df,
-                    "summary_df": summary_df,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-                st.success("Pipeline successfully completed and cached in short-term memory!")
-
-            # If data exists in short term memory, display results and advanced saving options
-            if st.session_state.short_term_cache is not None:
-                cache = st.session_state.short_term_cache
-                st.markdown("---")
-                st.write("### 📊 Executive KPI Summary")
-                st.dataframe(cache["summary_df"], use_container_width=True)
-
-                st.write("### ✨ Cleaned Data Sample")
-                st.dataframe(cache["clean_df"].head(10), use_container_width=True)
-
-                # Export Options & Long-Term Vault Storage configuration
-                st.markdown("### 🔒 Privacy & Long-Term Storage Controls")
-                col_opts1, col_opts2 = st.columns(2)
-                
-                with col_opts1:
-                    enable_vault_save = st.checkbox("Save report summary to Long-Term Secure Vault")
-                with col_opts2:
-                    enable_password = st.checkbox("Add Military-Grade Password Protection")
-
-                vault_report_name = ""
-                file_password = ""
-                if enable_vault_save:
-                    vault_report_name = st.text_input("Vault Record Label Name", value=f"Report_{cache['filename']}")
-                    if enable_password:
-                        file_password = st.text_input("Set File Password for Vault", type="password", placeholder="Enter secure password")
-
-                if st.button("📥 Generate & Export Clean Deliverables", type="primary"):
-                    # Build Excel payload in memory
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-                        cache["clean_df"].to_excel(writer, sheet_name="Clean Data", index=False)
-                        cache["summary_df"].to_excel(writer, sheet_name="Executive Summary", index=False)
-                    excel_bytes = buffer.getvalue()
-
-                    if enable_vault_save and vault_report_name:
-                        pwd_to_hash = file_password if enable_password and file_password else "default_secure_key"
-                        st.session_state.long_term_vault[vault_report_name] = {
-                            "summary": cache["summary_df"],
-                            "data": excel_bytes,
-                            "hash": hashlib.sha256(pwd_to_hash.encode()).hexdigest(),
-                            "timestamp": cache["timestamp"]
-                        }
-                        st.success(f"Successfully encrypted and locked '{vault_report_name}' into long-term secure vault!")
-
-                    st.download_button(
-                        label="📥 Download Clean Executive Report (.xlsx)",
-                        data=excel_bytes,
-                        file_name=f"cleaned_{cache['filename'].split('.')[0]}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-
-        except Exception as e:
-            st.error(f"Pipeline processing error: {e}")
-
-with tab_vault_viewer:
-    st.markdown("### 🧠 Active Memory & Long-Term Summaries")
-    if st.session_state.short_term_cache is not None:
-        st.info(f"Active Short-Term Cache File: **{st.session_state.short_term_cache['filename']}** (Loaded at {st.session_state.short_term_cache['timestamp']})")
-    else:
-        st.info("No active short-term data loaded in memory.")
-
-    st.markdown("---")
-    st.markdown("#### 📂 Vault Registry Overview")
-    if st.session_state.long_term_vault:
-        vault_overview = []
-        for name, info in st.session_state.long_term_vault.items():
-            vault_overview.append({"Report Name": name, "Saved Timestamp": info["timestamp"], "Protection": "Password Locked 🔐"})
-        st.dataframe(pd.DataFrame(vault_overview), use_container_width=True)
-    else:
-        st.write("Vault is empty. Run a pipeline and check the save option to store executive data logs securely.")
+if __name__ == "__main__":
+    if not Path(INPUT_FILE).exists():
+        print(f"Input file not found: {INPUT_FILE}\n"
+              f"Run generate_sample_data.py first to create a demo file.")
+        sys.exit(1)
+    DataPipeline(INPUT_FILE).run()
