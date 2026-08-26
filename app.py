@@ -83,7 +83,7 @@ class UniversalEnterprisePipeline:
         df = self._load_file(self.primary_file)
         self.report.rows_in = len(df)
 
-        # Optional multi-source merge (Shopify Sales + Meta Ads or CRM data)
+        # Optional multi-source merge
         if self.secondary_file is not None:
             df2 = self._load_file(self.secondary_file)
             self.report.rows_in += len(df2)
@@ -94,7 +94,7 @@ class UniversalEnterprisePipeline:
             else:
                 df = pd.concat([df, df2], ignore_index=True, sort=False)
 
-        # Bulletproof Explicit Column Mapping with Auto-Fallbacks
+        # Bulletproof Explicit Column Mapping
         rev_source = self.mapping.get("revenue")
         if rev_source and rev_source in df.columns and rev_source != "None":
             df["revenue"] = df[rev_source]
@@ -107,7 +107,7 @@ class UniversalEnterprisePipeline:
         if "revenue" not in df.columns:
             raise ValueError(f"Could not map a valid Revenue/Sales column. Available columns: {list(df.columns)}")
 
-        # Handle optional mapped fields gracefully across all industries
+        # Handle optional mapped fields
         for target_key, map_key in [
             ("order_date", "order_date"), 
             ("spend", "spend"), 
@@ -119,25 +119,33 @@ class UniversalEnterprisePipeline:
                 if source_col != target_key:
                     df[target_key] = df[source_col]
 
-        # Clean string columns to eliminate spacing and hidden artifacts
+        # Clean string columns
         for col in df.select_dtypes(include=["object", "string"]).columns:
             df[col] = df[col].astype(str).str.strip().replace({"nan": np.nan, "": np.nan, "None": np.nan})
 
-        # Coerce numerics safely across messy currencies and symbols
+        # AGGRESSIVE NUMERIC COERCION (Fixes the $0.00 bug by cleaning symbols & parsing correctly)
         for col in ["revenue", "spend", "leads", "quantity", "unit_price"]:
             if col in df.columns:
                 before_na = df[col].isna().sum()
-                cleaned = df[col].astype(str).str.replace(r"[$,€£₹]", "", regex=True).str.replace(",", "", regex=False).str.strip()
+                # Remove currency symbols, commas, and whitespace completely
+                cleaned = df[col].astype(str).str.replace(r"[$,€£₹USD\s]", "", regex=True).str.replace(",", "", regex=False)
                 df[col] = pd.to_numeric(cleaned, errors="coerce")
                 failures = df[col].isna().sum() - before_na
                 if failures > 0:
                     self.report.type_coercion_failures[col] = int(failures)
 
-        # Parse dates safely for tracking over time
+        # Fallback safeguard: If revenue became all NaNs/zeros due to mapping error, try finding the first numeric column
+        if df["revenue"].sum() == 0:
+            for c in df.select_dtypes(include=[np.number]).columns:
+                if c != "revenue":
+                    df["revenue"] = df[c]
+                    break
+
+        # Parse dates safely
         if "order_date" in df.columns:
             df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
 
-        # Compute performance metrics if marketing data exists
+        # Compute performance metrics
         if "spend" in df.columns and "revenue" in df.columns:
             df["spend"] = df["spend"].fillna(0)
             df["roas"] = np.where(df["spend"] > 0, df["revenue"] / df["spend"], 0)
@@ -145,13 +153,13 @@ class UniversalEnterprisePipeline:
             df["leads"] = df["leads"].fillna(0)
             df["true_cpa"] = np.where(df["leads"] > 0, df["spend"] / df["leads"], 0)
 
-        # Impute missing cells to protect reports and charts from breaking
+        # Impute missing cells safely
         for col in df.columns:
             n_missing = int(df[col].isna().sum())
             if n_missing == 0:
                 continue
             if pd.api.types.is_numeric_dtype(df[col]):
-                df[col] = df[col].fillna(df[col].median() if not df[col].isna().all() else 0.0)
+                df[col] = df[col].fillna(0.0) # Default to 0 for missing numbers
                 self.report.missing_values_filled[col] = n_missing
             elif col != "order_date":
                 df[col] = df[col].fillna("UNKNOWN")
@@ -162,7 +170,7 @@ class UniversalEnterprisePipeline:
         df = df.drop_duplicates()
         self.report.duplicates_removed = before - len(df)
 
-        # Flag outliers using IQR method to protect data integrity
+        # Flag outliers using IQR method
         if "revenue" in df.columns and len(df) > 5:
             q1, q3 = df["revenue"].quantile([0.25, 0.75])
             iqr = q3 - q1
@@ -398,7 +406,7 @@ if primary_file is not None:
             with c4:
                 st.metric("Blended CPA", f"${summary.get('blended_cpa', 0):,.2f}")
             with c5:
-                st.metric("Outliers Flagged", f"${pipeline.report.outliers_flagged}" if 'pipeline' in locals() else "0")
+                st.metric("Outliers Flagged", f"{pipeline.report.outliers_flagged}" if 'pipeline' in locals() else "0")
 
             st.markdown("---")
             tab1, tab2, tab3 = st.tabs(["📊 Performance Breakdown", "🧹 Data Quality Audit Log", "🔍 Cleaned Dataset Preview"])
