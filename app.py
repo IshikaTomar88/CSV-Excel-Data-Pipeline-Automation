@@ -1,6 +1,6 @@
 """
 FILE-BASED ENTERPRISE DATA PIPELINE & REPORTING SUITE
-Production-Grade Streamlit Application for Automated CSV/Excel Transformation
+Production-Grade Streamlit Application with Interactive Column Mapping
 """
 
 import io
@@ -15,7 +15,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 # --------------------------------------------------------------------------
-# PAGE CONFIGURATION & ENTERPRISE STYLING
+# PAGE CONFIGURATION
 # --------------------------------------------------------------------------
 st.set_page_config(
     page_title="Data Transformation & Executive Reporter",
@@ -39,14 +39,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-COLUMN_ALIASES = {
-    "revenue": ["revenue", "total_sales", "sales", "amount", "total_amount", "gmv"],
-    "order_date": ["order_date", "date", "transaction_date", "invoice_date", "timestamp"],
-    "quantity": ["quantity", "qty", "units", "volume"],
-    "unit_price": ["unit_price", "price", "rate", "cost_per_unit"],
-    "region": ["region", "market", "territory", "location", "zone", "branch"],
-}
-
 @dataclass
 class DataQualityReport:
     rows_in: int = 0
@@ -63,18 +55,19 @@ class DataQualityReport:
             f"Total rows in final clean dataset: {self.rows_out}",
             f"Exact duplicate rows dropped: {self.duplicates_removed}",
             f"Statistical outliers flagged for review (using IQR method): {self.outliers_flagged}",
-            f"Revenue values recalculated from quantity * unit_price: {self.revenue_recomputed}",
+            f"Revenue values recalculated/imputed: {self.revenue_recomputed}",
         ]
         for col, n in self.missing_values_filled.items():
-            lines.append(f"  - Column '{col}': {n} missing values imputed with column median / fallback")
+            lines.append(f"  - Column '{col}': {n} missing values filled safely")
         for col, n in self.type_coercion_failures.items():
             lines.append(f"  - Column '{col}': {n} malformed values coerced safely to NaN")
         return lines
 
 
 class EnterprisePipeline:
-    def __init__(self, uploaded_file):
+    def __init__(self, uploaded_file, mapping: dict):
         self.uploaded_file = uploaded_file
+        self.mapping = mapping  # User-defined column mapping
         self.report = DataQualityReport()
         self.df_raw: pd.DataFrame | None = None
         self.df_clean: pd.DataFrame | None = None
@@ -95,35 +88,21 @@ class EnterprisePipeline:
         self.report.rows_in = len(df)
         return df
 
-    def _normalize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        import re
-        df.columns = [re.sub(r"\s+", "_", c.strip().lower()) for c in df.columns]
-        rename_map = {}
-        for standard_name, aliases in COLUMN_ALIASES.items():
-            if standard_name not in df.columns:
-                for col in df.columns:
-                    if col in aliases:
-                        rename_map[col] = standard_name
-                        break
-        if rename_map:
-            df = df.rename(columns=rename_map)
-        return df
-
     def clean(self) -> pd.DataFrame:
         df = self.df_raw.copy()
-        df = self._normalize_columns(df)
+        
+        # Apply user's interactive column mapping to standardize core names
+        rename_inv = {v: k for k, v in self.mapping.items() if v}
+        df = df.rename(columns=rename_inv)
 
         if "revenue" not in df.columns:
-            if {"quantity", "unit_price"}.issubset(df.columns):
-                df["revenue"] = pd.to_numeric(df["quantity"], errors="coerce") * pd.to_numeric(df["unit_price"], errors="coerce")
-            else:
-                raise ValueError("Dataset lacks a 'revenue' column and cannot derive it without quantity/unit_price.")
+            raise ValueError("A valid 'Revenue' column must be mapped to proceed.")
 
         for col in df.select_dtypes(include=["object", "string"]).columns:
             df[col] = df[col].astype(str).str.strip().replace({"nan": np.nan, "": np.nan, "None": np.nan})
 
-        numeric_cols = ["quantity", "unit_price", "revenue"]
-        for col in numeric_cols:
+        # Coerce numerics for revenue, quantity, unit_price if present
+        for col in ["revenue", "quantity", "unit_price"]:
             if col in df.columns:
                 before_na = df[col].isna().sum()
                 cleaned = df[col].astype(str).str.replace(r"[$,€£]", "", regex=True).str.replace(",", "", regex=False).str.strip()
@@ -132,34 +111,28 @@ class EnterprisePipeline:
                 if failures > 0:
                     self.report.type_coercion_failures[col] = int(failures)
 
+        # Parse date if mapped
         if "order_date" in df.columns:
             df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
 
-        recomputed_mask = pd.Series(False, index=df.index)
-        if {"quantity", "unit_price"}.issubset(df.columns):
-            have_inputs = df["quantity"].notna() & df["unit_price"].notna()
-            expected_revenue = df["quantity"] * df["unit_price"]
-            mismatch = have_inputs & ((df["revenue"] - expected_revenue).abs() > 0.01)
-            missing_rev = have_inputs & df["revenue"].isna()
-            recomputed_mask = mismatch | missing_rev
-            df.loc[recomputed_mask, "revenue"] = expected_revenue[recomputed_mask]
-        self.report.revenue_recomputed = int(recomputed_mask.sum())
-
+        # Impute missing values
         for col in df.columns:
             n_missing = int(df[col].isna().sum())
             if n_missing == 0:
                 continue
-            if col in numeric_cols:
+            if pd.api.types.is_numeric_dtype(df[col]):
                 df[col] = df[col].fillna(df[col].median() if not df[col].isna().all() else 0.0)
                 self.report.missing_values_filled[col] = n_missing
             elif col != "order_date":
                 df[col] = df[col].fillna("UNKNOWN")
                 self.report.missing_values_filled[col] = n_missing
 
+        # Deduplicate
         before = len(df)
         df = df.drop_duplicates()
         self.report.duplicates_removed = before - len(df)
 
+        # Outlier flag (IQR method)
         if "revenue" in df.columns and len(df) > 5:
             q1, q3 = df["revenue"].quantile([0.25, 0.75])
             iqr = q3 - q1
@@ -181,7 +154,9 @@ class EnterprisePipeline:
             summary["avg_order_value"] = round(float(df["revenue"].mean()), 2)
             summary["order_count"] = int(len(df))
 
-        group_col = "region" if "region" in df.columns else (df.select_dtypes(include=["object", "string"]).columns[0] if len(df.select_dtypes(include=["object", "string"]).columns) > 0 else None)
+        # Find first categorical or text column for grouping
+        group_candidates = [c for c in df.select_dtypes(include=["object", "string"]).columns if c != "flag_outlier"]
+        group_col = group_candidates[0] if group_candidates else None
         
         if group_col and "revenue" in df.columns:
             by_group = df.groupby(group_col)["revenue"].sum().sort_values(ascending=False).round(2)
@@ -317,81 +292,111 @@ class EnterprisePipeline:
 # STREAMLIT UI
 st.sidebar.title("⚡ Pipeline Studio")
 st.sidebar.markdown("---")
-st.sidebar.info(
-    "**Description:** An offline file transformation utility built to clean "
-    "messy CSV/Excel client datasets and export formatted executive reports."
-)
+st.sidebar.info("Upload any custom CSV/Excel file, map your columns interactively, and generate a clean executive report.")
 st.sidebar.markdown("### Developer")
 st.sidebar.write("**Ishika Tomar**")
 
 st.title("📊 File-Based Data Transformation & Executive Reporting Pipeline")
-st.markdown("Upload raw CSV or Excel client exports to normalize schemas, clean missing values, flag statistical outliers, and export formatted workbooks.")
+st.markdown("Upload raw CSV or Excel client exports below. If your column names don't match standard formats, you can map them interactively.")
 
 uploaded_file = st.file_uploader("Upload Raw Client Dataset (CSV or Excel)", type=["csv", "xlsx", "xls"])
 
 if uploaded_file is not None:
     try:
-        with st.spinner("Executing data normalization and validation pipeline..."):
-            pipeline = EnterprisePipeline(uploaded_file)
-            pipeline.ingest()
-            df_clean = pipeline.clean()
-            summary = pipeline.analyze()
-            excel_bytes = pipeline.build_excel_bytes(summary)
+        # Quick preview read to get column names for mapping
+        temp_df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
+        cols = list(temp_df.columns)
 
-        st.success("✅ Pipeline Executed Successfully.")
+        st.markdown("### 🗺️ Step 2: Map Your Columns")
+        st.info("Match your file's columns to the required reporting fields below:")
+        
+        col_map1, col_map2 = st.columns(2)
+        with col_map1:
+            # Try to auto-guess defaults if possible
+            def_rev = next((c for c in cols if any(x in c.lower() for x in ["rev", "sales", "amount", "total"])), cols[0])
+            rev_col = st.selectbox("Select Revenue / Sales Column (Required)", cols, index=cols.index(def_rev) if def_rev in cols else 0)
+            
+            date_candidates = [c for c in cols if any(x in c.lower() for x in ["date", "time", "day"])]
+            def_date = date_candidates[0] if date_candidates else None
+            date_col = st.selectbox("Select Date Column (Optional)", ["None"] + cols, index=cols.index(def_date)+1 if def_date in cols else 0)
 
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total Revenue", f"${summary.get('total_revenue', 0):,.2f}")
-        with col2:
-            st.metric("Average Order Value", f"${summary.get('avg_order_value', 0):,.2f}")
-        with col3:
-            st.metric("Total Clean Orders", f"{summary.get('order_count', 0):,}")
-        with col4:
-            st.metric("Outliers Flagged", f"{pipeline.report.outliers_flagged}")
+        with col_map2:
+            qty_candidates = [c for c in cols if any(x in c.lower() for x in ["qty", "quantity", "units"])]
+            def_qty = qty_candidates[0] if qty_candidates else None
+            qty_col = st.selectbox("Select Quantity Column (Optional)", ["None"] + cols, index=cols.index(def_qty)+1 if def_qty in cols else 0)
 
-        st.markdown("---")
+            price_candidates = [c for c in cols if any(x in c.lower() for x in ["price", "rate", "cost"])]
+            def_price = price_candidates[0] if price_candidates else None
+            price_col = st.selectbox("Select Unit Price Column (Optional)", ["None"] + cols, index=cols.index(def_price)+1 if def_price in cols else 0)
 
-        tab1, tab2, tab3 = st.tabs(["📊 Analytics Breakdown", "🧹 Data Quality Audit Log", "🔍 Cleaned Dataset Preview"])
-
-        with tab1:
-            st.subheader("Executive Performance Overview")
-            if "revenue_by_group" in summary:
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.write(f"**Revenue Breakdown by {summary.get('group_column_name', 'Group').title()}**")
-                    st.dataframe(summary["revenue_by_group"], use_container_width=True)
-                with col_b:
-                    if "monthly_revenue" in summary and not summary["monthly_revenue"].empty:
-                        st.write("**Monthly Revenue Trend**")
-                        st.line_chart(summary["monthly_revenue"])
-            else:
-                st.info("No grouping column detected for regional aggregation.")
-
-        with tab2:
-            st.subheader("Data Health & Integrity Audit Log")
-            st.markdown("This log explicitly lists how the pipeline processed raw anomalies:")
-            for line in pipeline.report.summary_lines():
-                st.text(line)
-
-        with tab3:
-            st.subheader("Cleaned Dataset")
-            st.dataframe(df_clean, use_container_width=True)
+        mapping = {
+            "revenue": rev_col,
+            "order_date": None if date_col == "None" else date_col,
+            "quantity": None if qty_col == "None" else qty_col,
+            "unit_price": None if price_col == "None" else price_col
+        }
 
         st.markdown("---")
-        st.subheader("📥 Export Workbook")
-        st.download_button(
-            label="Download Formatted Executive Report (.xlsx)",
-            data=excel_bytes,
-            file_name="executive_client_report.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        if st.button("🚀 Run Cleaning & Reporting Pipeline"):
+            with st.spinner("Processing pipeline: Cleaning data and generating executive report..."):
+                pipeline = EnterprisePipeline(uploaded_file, mapping)
+                pipeline.ingest()
+                df_clean = pipeline.clean()
+                summary = pipeline.analyze()
+                excel_bytes = pipeline.build_excel_bytes(summary)
+
+            st.success("✅ Pipeline Executed Successfully!")
+
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Revenue", f"${summary.get('total_revenue', 0):,.2f}")
+            with col2:
+                st.metric("Average Order Value", f"${summary.get('avg_order_value', 0):,.2f}")
+            with col3:
+                st.metric("Total Clean Orders", f"{summary.get('order_count', 0):,}")
+            with col4:
+                st.metric("Outliers Flagged", f"{pipeline.report.outliers_flagged}")
+
+            st.markdown("---")
+            tab1, tab2, tab3 = st.tabs(["📊 Analytics Breakdown", "🧹 Data Quality Audit Log", "🔍 Cleaned Dataset Preview"])
+
+            with tab1:
+                st.subheader("Executive Performance Overview")
+                if "revenue_by_group" in summary:
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.write(f"**Revenue Breakdown by {summary.get('group_column_name', 'Group').title()}**")
+                        st.dataframe(summary["revenue_by_group"], use_container_width=True)
+                    with col_b:
+                        if "monthly_revenue" in summary and not summary["monthly_revenue"].empty:
+                            st.write("**Monthly Revenue Trend**")
+                            st.line_chart(summary["monthly_revenue"])
+                else:
+                    st.info("No categorical grouping column detected for regional charts.")
+
+            with tab2:
+                st.subheader("Data Health & Integrity Audit Log")
+                for line in pipeline.report.summary_lines():
+                    st.text(line)
+
+            with tab3:
+                st.subheader("Cleaned Dataset")
+                st.dataframe(df_clean, use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("📥 Export Workbook")
+            st.download_button(
+                label="Download Formatted Executive Report (.xlsx)",
+                data=excel_bytes,
+                file_name="executive_client_report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
     except Exception as e:
         st.error(f"Pipeline Error: {str(e)}")
 else:
     st.markdown(
         """
-        > **Instructions:** Upload a standard tabular CSV or Excel file. The script handles column alias mapping, data type coercion, missing data imputation, and outlier flagging automatically.
+        > **Instructions:** Upload any standard CSV or Excel file above. The app will let you interactively select your columns so it will never crash on custom column names again!
         """
     )
