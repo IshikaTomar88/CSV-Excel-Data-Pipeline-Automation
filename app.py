@@ -62,6 +62,24 @@ class DataQualityReport:
         return lines
 
 
+def read_uploaded(file_obj) -> pd.DataFrame:
+    """Read a Streamlit UploadedFile safely, no matter how many times
+    it's been read before. Streamlit's UploadedFile is a stream with a
+    read pointer — once you read it, the pointer sits at EOF and the
+    next read returns nothing ('No columns to parse from file') unless
+    you rewind it first."""
+    filename = file_obj.name.lower()
+    file_obj.seek(0)
+    if filename.endswith(".csv"):
+        df = pd.read_csv(file_obj)
+    elif filename.endswith((".xls", ".xlsx")):
+        df = pd.read_excel(file_obj)
+    else:
+        raise ValueError(f"Unsupported file format for {file_obj.name}")
+    file_obj.seek(0)  # leave it rewound for whoever reads it next
+    return df
+
+
 class UniversalEnterprisePipeline:
     def __init__(self, primary_file, secondary_file=None, mapping=None):
         self.primary_file = primary_file
@@ -71,17 +89,11 @@ class UniversalEnterprisePipeline:
         self.df_clean: pd.DataFrame | None = None
 
     def _load_file(self, file_obj) -> pd.DataFrame:
-        filename = file_obj.name.lower()
-        if filename.endswith(".csv"):
-            return pd.read_csv(file_obj)
-        elif filename.endswith((".xls", ".xlsx")):
-            return pd.read_excel(file_obj)
-        else:
-            raise ValueError(f"Unsupported file format for {file_obj.name}")
+        return read_uploaded(file_obj)
 
     def process(self) -> pd.DataFrame:
         df = self._load_file(self.primary_file)
-        
+
         # Guard against uploading the output report itself
         if "Metric" in df.columns and "Value" in df.columns:
             raise ValueError("You uploaded an already-generated executive report! Please upload your raw data export file (e.g., Shopify, CRM, or Ads CSV/Excel).")
@@ -114,9 +126,9 @@ class UniversalEnterprisePipeline:
 
         # Handle optional mapped fields
         for target_key, map_key in [
-            ("order_date", "order_date"), 
-            ("spend", "spend"), 
-            ("leads", "leads"), 
+            ("order_date", "order_date"),
+            ("spend", "spend"),
+            ("leads", "leads"),
             ("region", "region")
         ]:
             source_col = self.mapping.get(map_key)
@@ -199,7 +211,7 @@ class UniversalEnterprisePipeline:
 
         group_candidates = [c for c in df.select_dtypes(include=["object", "string"]).columns if c != "flag_outlier"]
         group_col = group_candidates[0] if group_candidates else None
-        
+
         if group_col and "revenue" in df.columns:
             by_group = df.groupby(group_col)["revenue"].sum().sort_values(ascending=False).round(2)
             total = by_group.sum()
@@ -248,9 +260,9 @@ class UniversalEnterprisePipeline:
                 ws[f"A{row}"] = label
                 cell = ws[f"B{row}"]
                 cell.value = summary[key]
-                if fmt and fmt != "ROAS_FMT": 
+                if fmt and fmt != "ROAS_FMT":
                     cell.number_format = fmt
-                elif fmt == "ROAS_FMT": 
+                elif fmt == "ROAS_FMT":
                     cell.number_format = '0.00"x"'
                 row += 1
 
@@ -351,20 +363,21 @@ with col_up2:
 
 if primary_file is not None:
     try:
-        temp_df = pd.read_csv(primary_file) if primary_file.name.endswith(".csv") else pd.read_excel(primary_file)
-        
+        temp_df = read_uploaded(primary_file)
+
         if "Metric" in temp_df.columns and "Value" in temp_df.columns:
             st.error("⚠️ You uploaded an already-generated executive report summary file! Please upload your original raw transactional dataset (e.g., Shopify orders export, CRM lead list, or ad performance CSV).")
         else:
             if secondary_file is not None:
-                temp_df2 = pd.read_csv(secondary_file) if secondary_file.name.endswith(".csv") else pd.read_excel(secondary_file)
-                cols = list(set(temp_df.columns).union(set(temp_df2.columns)))
+                temp_df2 = read_uploaded(secondary_file)
+                # preserve first-seen column order instead of an unordered set
+                cols = list(dict.fromkeys(list(temp_df.columns) + list(temp_df2.columns)))
             else:
                 cols = list(temp_df.columns)
 
             st.markdown("### 🗺️ Interactive Column Mapper")
             st.info("Map your file columns to standard reporting fields so the pipeline processes seamlessly:")
-            
+
             def_rev_idx = 0
             for idx, c in enumerate(cols):
                 if any(x in c.lower() for x in ["rev", "sales", "amount", "total", "price", "value"]):
@@ -392,6 +405,11 @@ if primary_file is not None:
             st.markdown("---")
             if st.button("🚀 Execute Enterprise Pipeline & Generate Report"):
                 with st.spinner("Processing data, cleaning anomalies, and formatting executive workbook..."):
+                    # Rewind both uploads right before the pipeline reads them —
+                    # they may already have been consumed by temp_df/temp_df2 above.
+                    primary_file.seek(0)
+                    if secondary_file is not None:
+                        secondary_file.seek(0)
                     pipeline = UniversalEnterprisePipeline(primary_file, secondary_file, mapping)
                     df_clean = pipeline.process()
                     summary = pipeline.analyze()
@@ -409,7 +427,7 @@ if primary_file is not None:
                 with c4:
                     st.metric("Blended CPA", f"${summary.get('blended_cpa', 0):,.2f}")
                 with c5:
-                    st.metric("Outliers Flagged", f"{pipeline.report.outliers_flagged}" if 'pipeline' in locals() else "0")
+                    st.metric("Outliers Flagged", f"{pipeline.report.outliers_flagged}")
 
                 st.markdown("---")
                 tab1, tab2, tab3 = st.tabs(["📊 Performance Breakdown", "🧹 Data Quality Audit Log", "🔍 Cleaned Dataset Preview"])
