@@ -438,6 +438,7 @@ if primary_file is not None:
                         col_a, col_b = st.columns(2)
                         with col_a:
                             st.write(f"**Revenue Breakdown by {summary.get('group_column_name', 'Group').title()}**")
+                            st.bar_chart(summary["revenue_by_group"])
                             st.dataframe(summary["revenue_by_group"], use_container_width=True)
                         with col_b:
                             if "monthly_revenue" in summary and not summary["monthly_revenue"].empty:
@@ -445,6 +446,38 @@ if primary_file is not None:
                                 st.line_chart(summary["monthly_revenue"])
                     else:
                         st.info("Clean dataset processed successfully. Map a grouping/region column to view category distribution charts.")
+
+                    # --- Outlier visualization ---
+                    if "flag_outlier" in df_clean.columns and df_clean["flag_outlier"].any():
+                        st.markdown("---")
+                        st.write(f"**Revenue Outliers Flagged — {int(df_clean['flag_outlier'].sum())} record(s) (IQR method)**")
+                        outlier_plot_df = (
+                            df_clean[["revenue", "flag_outlier"]]
+                            .reset_index()
+                            .rename(columns={"index": "record_no"})
+                        )
+                        st.scatter_chart(
+                            outlier_plot_df, x="record_no", y="revenue", color="flag_outlier", size=60
+                        )
+                        st.caption("Each point is one record. Records outside the normal revenue range (per the IQR method) are highlighted — worth a manual review before trusting the totals above.")
+
+                    # --- ROAS trend over time ---
+                    if (
+                        "roas" in df_clean.columns
+                        and "order_date" in df_clean.columns
+                        and df_clean["order_date"].notna().sum() > 0
+                        and "spend" in df_clean.columns
+                    ):
+                        st.markdown("---")
+                        st.write("**Blended ROAS Trend by Month**")
+                        monthly_roas = (
+                            df_clean.dropna(subset=["order_date"])
+                            .set_index("order_date")
+                            .resample("ME")
+                            .apply(lambda g: g["revenue"].sum() / g["spend"].sum() if g["spend"].sum() > 0 else 0)
+                        )
+                        st.line_chart(monthly_roas.rename("ROAS"))
+                        st.caption("Blended ROAS = total revenue ÷ total ad spend, grouped by month.")
 
                 with tab2:
                     st.subheader("Data Health & Integrity Audit Log")
